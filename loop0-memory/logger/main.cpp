@@ -2,6 +2,8 @@
 #include <iostream>
 #include <stdexcept>
 
+using logger::Logger;
+
 void earlyReturnTest() {
     logger::Logger logger("app.log");
     logger.logLine("start");
@@ -9,29 +11,25 @@ void earlyReturnTest() {
 };
 
 int main() {
-    std::cout << "Program started\n" ;
-    logger::Logger logger("app.log");
-    logger.logLine("hello");
-    std::cout << "PASS: basic logging (check app.log)\n";
+    Logger a("a.log");
+    Logger b = std::move(a);
 
-    {
-        logger::Logger logger("app.log");
-        logger.logLine("nested scope, hello");
-    }
-    std::cout << "PASS: scope exit triggers destructor\n";
+    std::cout << "After move-construct b from a:\n";
+    std::cout << "  a.isOpen() = " << a.isOpen() << "\n";
+    std::cout << "  b.isOpen() = " << b.isOpen() << "\n";
 
-    earlyReturnTest();
-    std::cout << "PASS: early return didnt leak\n" ;
-  
-    try {
-        logger::Logger logger(".");
-        logger.logLine("should throw");
-        std::cout << "FAIL: expected constructor to throw\n";
-        return 1;
-    } catch (const std::runtime_error&) {
-        std::cout << "PASS: exception caught\n" ;
- }
-    std::cout << "Program ended\n";
+    Logger c("c.log");
+    c.logLine("c: before assigning from moved-from a");
+
+    c = std::move(a); // a is already moved-from here
+
+    std::cout << "After move-assign c from moved-from a:\n";
+    std::cout << "  a.isOpen() = " << a.isOpen() << "\n";
+    std::cout << "  c.isOpen() = " << c.isOpen() << "\n";
+
+    c.logLine("c: after assigning from moved-from a (should NOT log)");
+    b.logLine("b: should still log (owns a.log)");
+
 
     
     return 0;
