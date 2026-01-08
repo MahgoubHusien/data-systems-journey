@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <iostream>
 
+#include <memory>
 
 
 namespace logger{
@@ -17,27 +18,23 @@ public:
     Logger& operator=(const Logger&) = delete;
 
     // We enable move construction and assignment
-    Logger(Logger&&) noexcept;
-    Logger& operator=(Logger&&) noexcept;
+    Logger(Logger&&) noexcept = default;
+    Logger& operator=(Logger&&) noexcept = default;
 
-    ~Logger() noexcept{
-        std::cerr << "~Logger called\n";
-        if (ready_) flush();
-        delete[] buffer_;
-    }
+    ~Logger() noexcept = default;
+    
 
-    void logLine(std::string_view message);
-    void flush();
+    void logLine(std::string_view message) noexcept;
+    void flush() noexcept;
+
 
 
 private:
     // A pointer to a runtime-managed object that knows how to talk to the OS for file operations.
     std::ofstream file_;
     static constexpr size_t BUFFER_SIZE = 4096;
-    char* buffer_ = nullptr; // 4KB buffer for logging
-    size_t capacity_ = 0;
-    size_t pos_ = 0;
-    bool ready_ = false;
+    std::unique_ptr<char[]> buffer_ = nullptr; // 4KB buffer for logging
+    std::size_t pos_ = 0;
 
 };
 } // namespace logger

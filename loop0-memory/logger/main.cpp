@@ -4,10 +4,8 @@
 
 
 int main() {
-    try {
-        logger::Logger log("x.log");
-    } catch (const std::exception& e) {
-        std::cerr << "Caught: " << e.what() << "\n";
-    }
-    return 0;
+    logger::Logger log("test.log");
+    log.logLine("a");
+    log.logLine("b");
+    log.flush();
 }
