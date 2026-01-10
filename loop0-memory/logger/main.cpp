@@ -5,7 +5,11 @@
 
 int main() {
     logger::Logger log("test.log");
-    log.logLine("a");
-    log.logLine("b");
+
+    log.log(logger::Level::Info,  "startup");
+    log.log(logger::Level::Warn,  "disk 90% full");
+    log.log(logger::Level::Error, "failed to write file");
+    log.log(logger::Level::Debug, "retrying");
+
     log.flush();
 }
