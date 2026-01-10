@@ -6,10 +6,11 @@
 
 namespace logger{
 
-Logger::Logger(std::string_view file) :  file_(std::string(file), std::ios::app), buffer_(std::make_unique<char[]>(BUFFER_SIZE)), pos_(0){
+Logger::Logger(Config cfg) :  file_(cfg.path, std::ios::app), buffer_(std::make_unique<char[]>(cfg.buffer_size)), pos_(0), flush_on_each_write_(cfg.flush_on_each_write){
     
     if (!file_.is_open()) throw std::runtime_error("Failed to open log file");
-
+    if (cfg.buffer_size == 0) throw std::runtime_error("Buffer Size is 0");
+    cap_ = cfg.buffer_size;
     alive_ = true;
 
 }
@@ -17,11 +18,15 @@ Logger::Logger(std::string_view file) :  file_(std::string(file), std::ios::app)
 Logger::Logger(Logger&& other) noexcept
   : file_(std::move(other.file_)),
     buffer_(std::move(other.buffer_)),
+    cap_(other.cap_),
     pos_(other.pos_),
+    flush_on_each_write_(other.flush_on_each_write_),
     alive_(other.alive_)
 {
   // Source is now moved-from: make it dead-by-contract.
+  other.cap_ = 0;
   other.pos_ = 0;
+  other.flush_on_each_write_ = false;
   other.alive_ = false;
 }
 
@@ -33,10 +38,14 @@ Logger& Logger::operator=(Logger&& other) noexcept {
   
     file_   = std::move(other.file_);
     buffer_ = std::move(other.buffer_);
+    cap_    = other.cap_;
     pos_    = other.pos_;
+    flush_on_each_write_ = other.flush_on_each_write_;
     alive_  = other.alive_;
   
+    other.cap_ = 0;
     other.pos_ = 0;
+    other.flush_on_each_write_ = false;
     other.alive_ = false;
   
     return *this;
@@ -62,7 +71,7 @@ void Logger::log(Level sToLevel, std::string_view message) noexcept{
     const size_t messageLen = message.size();
     const size_t needed = levelLen + messageLen + 1 + 1 + 1 + 1; // '[', ']', ' ', '\n' 
 
-    if (needed > BUFFER_SIZE){
+    if (needed > cap_){
         if (pos_ > 0) flush();
         file_.write("[", 1);        
         file_.write(level.data(), static_cast<std::streamsize>(levelLen));
@@ -74,7 +83,7 @@ void Logger::log(Level sToLevel, std::string_view message) noexcept{
         return;
     }
 
-    if (pos_ + needed > BUFFER_SIZE){
+    if (pos_ + needed > cap_){
         flush();
     }
 
@@ -88,6 +97,7 @@ void Logger::log(Level sToLevel, std::string_view message) noexcept{
     std::memcpy(buffer_.get() + pos_, message.data(), messageLen);
     pos_ += messageLen;
     buffer_[pos_++] = '\n';
+    if (flush_on_each_write_) flush();
 }
 
 void Logger::flush() noexcept{
@@ -108,7 +118,9 @@ void Logger::shutdown() noexcept{
     alive_ = false;
 
     if (file_.is_open()) file_.close();    
+    cap_ = 0;
     pos_ = 0;
+    flush_on_each_write_ = false;
     buffer_.reset();
 }
 

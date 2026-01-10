@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 
 namespace logger{
@@ -16,9 +17,15 @@ enum class Level : std::uint8_t {
     Error
 };
 
+struct Config {
+    std::string path;
+    std::size_t buffer_size = 4096;
+    bool flush_on_each_write = false;
+};
+
 class Logger{
 public:
-    explicit Logger(std::string_view file);
+    explicit Logger(Config cfg);
     Logger() = delete;
     // We delete copy construction and copy assignment so duplicating a resource-owning object is impossible at compile time.
     Logger(const Logger&) = delete;
@@ -41,9 +48,11 @@ public:
 
 private:
     std::ofstream file_;
-    static constexpr size_t BUFFER_SIZE = 4096;
-    std::unique_ptr<char[]> buffer_ = nullptr; // 4KB buffer for logging
+    std::unique_ptr<char[]> buffer_ = nullptr; 
+    std::size_t cap_ = 0;
     std::size_t pos_ = 0;
+
+    bool flush_on_each_write_ = false;
     bool alive_ = false;
     static std::string_view levelToString(Level level) noexcept;
 };
