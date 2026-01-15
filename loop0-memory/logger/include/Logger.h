@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <mutex>
 
 
 namespace logger{
@@ -23,6 +24,10 @@ struct Config {
     bool flush_on_each_write = false;
 };
 
+
+// Thread-safety:
+// - log(), flush(), shutdown() are safe to call concurrently.
+// - Logger must not be moved/destroyed while other threads may call its methods.
 class Logger{
 public:
     explicit Logger(Config cfg);
@@ -42,11 +47,12 @@ public:
 
     void flush() noexcept;
     void shutdown() noexcept;
-    bool alive() const noexcept { return alive_; }
+    bool alive() const noexcept { std::lock_guard<std::mutex> lock(m_); return alive_; }
 
 
 
 private:
+    mutable std::mutex m_;
     std::ofstream file_;
     std::unique_ptr<char[]> buffer_ = nullptr; 
     std::size_t cap_ = 0;
@@ -55,5 +61,7 @@ private:
     bool flush_on_each_write_ = false;
     bool alive_ = false;
     static std::string_view levelToString(Level level) noexcept;
+    void flush_unlocked() noexcept;
+    void shutdown_unlocked() noexcept;
 };
 } // namespace logger
