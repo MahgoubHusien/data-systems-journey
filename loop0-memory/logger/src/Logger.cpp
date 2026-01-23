@@ -1,10 +1,8 @@
 #include "Logger.h"
 #include <stdexcept>
 #include <cstring>
-#include <string>
 
-
-namespace logger{
+namespace logger {
 
 Logger::Logger(Config cfg) : pos_(0), flush_on_each_write_(cfg.flush_on_each_write) {
     if (cfg.buffer_size == 0) throw std::runtime_error("Buffer Size is 0");
@@ -14,137 +12,181 @@ Logger::Logger(Config cfg) : pos_(0), flush_on_each_write_(cfg.flush_on_each_wri
 
     buffer_ = std::make_unique<char[]>(cfg.buffer_size);
     cap_ = cfg.buffer_size;
-    alive_ = true;
-}
-    
 
-Logger::Logger(Logger&& other) noexcept {
-    std::lock_guard<std::mutex> lock(other.m_);
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        alive_ = true;
+        shutdown_ = false;
+        q_cap_ = 1024; // choose policy: 1k entries
+    }
 
-    file_ = std::move(other.file_);
-    buffer_ = std::move(other.buffer_);
-    cap_ = other.cap_;
-    pos_ = other.pos_;
-    flush_on_each_write_ = other.flush_on_each_write_;
-    alive_ = other.alive_;
-
-    other.cap_ = 0;
-    other.pos_ = 0;
-    other.flush_on_each_write_ = false;
-    other.alive_ = false;
+    worker_ = std::thread(&Logger::worker_loop, this);
 }
 
-
-Logger& Logger::operator=(Logger&& other) noexcept {
-    if (this == &other) return *this;
-  
-    std::scoped_lock lock(m_, other.m_);
-    shutdown_unlocked();
-  
-    file_   = std::move(other.file_);
-    buffer_ = std::move(other.buffer_);
-    cap_    = other.cap_;
-    pos_    = other.pos_;
-    flush_on_each_write_ = other.flush_on_each_write_;
-    alive_  = other.alive_;
-  
-    other.cap_ = 0;
-    other.pos_ = 0;
-    other.flush_on_each_write_ = false;
-    other.alive_ = false;
-  
-    return *this;
-  }
-
-std::string_view Logger::levelToString(Level level) noexcept{
-    switch(level){
+std::string_view Logger::levelToString(Level level) noexcept {
+    switch (level) {
         case Level::Debug: return "DEBUG";
-        case Level::Info: return "INFO";
-        case Level::Warn: return "WARN";
+        case Level::Info:  return "INFO";
+        case Level::Warn:  return "WARN";
         case Level::Error: return "ERROR";
     }
     return "UNKNOWN";
 }
-  
 
-void Logger::log(Level sToLevel, std::string_view message) noexcept{
-    std::lock_guard<std::mutex> lock(m_);
-    if (!alive_ || !file_.is_open() || !buffer_) return; // moved-from or closed 
+void Logger::log(Level lvl, std::string_view message) noexcept {
+    // format outside lock
+    std::string entry;
+    {
+        const auto level = levelToString(lvl);
+        entry.reserve(level.size() + message.size() + 4);
+        entry.push_back('[');
+        entry.append(level);
+        entry.append("] ");
+        entry.append(message);
+        entry.push_back('\n');
+    }
 
-    std::string_view level = levelToString(sToLevel);
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        if (!alive_ || shutdown_) return;
 
-    const size_t levelLen = level.size();
-    const size_t messageLen = message.size();
-    const size_t needed = levelLen + messageLen + 1 + 1 + 1 + 1; // '[', ']', ' ', '\n' 
-
-    if (needed > cap_){
-        if (pos_ > 0) flush_unlocked();
-        file_.write("[", 1);        
-        file_.write(level.data(), static_cast<std::streamsize>(levelLen));
-        file_.write("] ", 2);
-
-        file_.write(message.data(), static_cast<std::streamsize>(messageLen));
-        file_.write("\n", 1);
-
-        if (flush_on_each_write_){
-            file_.flush();
+        if (q_.size() == q_cap_) {
+            q_.pop_front(); // DROP OLDEST
         }
+        q_.push_back(std::move(entry));
+    }
+    cv_wakeup_.notify_one();
+}
+
+void Logger::worker_loop() noexcept {
+    while (true) {
+        std::deque<std::string> local;
+        std::uint64_t local_flush_req = 0;
+
+        {
+            std::unique_lock<std::mutex> lock(m_);
+            cv_wakeup_.wait(lock, [&] {
+                return shutdown_ || !q_.empty() || flush_req_ != flush_ack_;
+            });
+
+            if (flush_req_ != flush_ack_) {
+                local_flush_req = flush_req_;
+            }
+
+            local.swap(q_);
+
+            if (shutdown_ && local.empty() && local_flush_req == 0) {
+                break;
+            }
+        } // unlock
+
+        // write batch (no mutex)
+        while (!local.empty()) {
+            write_one_(local.front());
+            local.pop_front();
+        }
+
+        // push our internal buffer to the stream after each batch
+        flush_unlocked();
+
+        // strong flush: force stream flush + ack ticket
+        if (local_flush_req != 0) {
+            if (file_.is_open()) file_.flush();
+
+            {
+                std::lock_guard<std::mutex> lock(m_);
+                flush_ack_ = std::max(flush_ack_, local_flush_req);
+            }
+            cv_flushed_.notify_all();
+        }
+    }
+
+    // final drain
+    flush_unlocked();
+    if (file_.is_open()) file_.flush();
+
+    // unblock any flush waiters
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        flush_ack_ = flush_req_;
+    }
+    cv_flushed_.notify_all();
+}
+
+void Logger::write_one_(std::string_view msg) noexcept {
+    if (!file_.is_open() || !buffer_) return;
+
+    const std::size_t needed = msg.size();
+
+    // large message: flush buffer then write directly
+    if (needed > cap_) {
+        if (pos_ > 0) flush_unlocked();
+        file_.write(msg.data(), static_cast<std::streamsize>(needed));
+        if (flush_on_each_write_) file_.flush();
         return;
     }
 
-    if (pos_ + needed > cap_){
+    if (pos_ + needed > cap_) {
         flush_unlocked();
     }
 
-    buffer_[pos_++] = '[';
-    std::memcpy(buffer_.get() + pos_, level.data(), levelLen);
-    pos_ += levelLen;
+    std::memcpy(buffer_.get() + pos_, msg.data(), needed);
+    pos_ += needed;
 
-    buffer_[pos_++] = ']';
-    buffer_[pos_++] = ' ';
-
-    std::memcpy(buffer_.get() + pos_, message.data(), messageLen);
-    pos_ += messageLen;
-    buffer_[pos_++] = '\n';
-    if (flush_on_each_write_){ 
+    if (flush_on_each_write_) {
         flush_unlocked();
         file_.flush();
     }
 }
 
-void Logger::flush_unlocked() noexcept{
-    if (!alive_ || !file_.is_open() || !buffer_ || pos_ == 0) return;
-
+void Logger::flush_unlocked() noexcept {
+    if (!file_.is_open() || !buffer_ || pos_ == 0) return;
     file_.write(buffer_.get(), static_cast<std::streamsize>(pos_));
     pos_ = 0;
 }
 
-void Logger::flush() noexcept{
-    std::lock_guard<std::mutex> lock(m_);
-    if (!alive_ || !file_.is_open()) return;
-    flush_unlocked();
-    file_.flush();
+void Logger::flush() noexcept {
+    std::uint64_t req = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        if (!alive_ || shutdown_) return;
+        req = ++flush_req_;
+    }
+    cv_wakeup_.notify_one();
+
+    std::unique_lock<std::mutex> lock(m_);
+    cv_flushed_.wait(lock, [&] {
+        return flush_ack_ >= req || shutdown_ || !alive_;
+    });
 }
 
-void Logger::shutdown_unlocked() noexcept{
-    if (!alive_) return;
+void Logger::shutdown() noexcept {
+    std::thread t;
 
-    if (buffer_ && pos_ > 0){
-        flush_unlocked();
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        if (!alive_) return;
+        shutdown_ = true;
+        t = std::move(worker_);
     }
 
-    alive_ = false;
+    cv_wakeup_.notify_one();
+    cv_flushed_.notify_all();
 
-    if (file_.is_open()) file_.close();    
+    if (t.joinable()) t.join();
+
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        alive_ = false;
+    }
+    cv_flushed_.notify_all();
+
+    // cleanup (worker is gone)
+    if (file_.is_open()) file_.close();
+    buffer_.reset();
     cap_ = 0;
     pos_ = 0;
     flush_on_each_write_ = false;
-    buffer_.reset();
-}
-
-void Logger::shutdown() noexcept{
-    std::lock_guard<std::mutex> lock(m_);
-    shutdown_unlocked();
 }
 
 } // namespace logger
